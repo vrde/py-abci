@@ -44,68 +44,67 @@ class ProtocolHandler:
     Tendermint.  The handler delegates call to your application"""
     def __init__(self, app):
         self.app = app
+        self.is_asynchronous = getattr(app, 'is_asynchronous', False)
 
     def process(self,req_type, req):
         handler = getattr(self, req_type, self.no_match)
-        return handler(req)
+        response = handler(req)
+        if isinstance(response, Response):
+            response = [response]
+        return response
 
     def echo(self, req):
         msg = req.echo.message
-        response = Response(echo=ResponseEcho(message=msg))
-        return write_message(response)
+        return Response(echo=ResponseEcho(message=msg))
 
     def flush(self, req):
-        response = Response(flush=ResponseFlush())
-        return write_message(response)
+        return Response(flush=ResponseFlush())
 
     def info(self, req):
         result = self.app.info(req.info)
-        response = Response(info=result)
-        return write_message(response)
+        return Response(info=result)
 
     def set_option(self, req):
         result = self.app.set_option(req.set_option)
-        response = Response(set_option=result)
-        return write_message(response)
+        return Response(set_option=result)
 
     def check_tx(self, req):
         result = self.app.check_tx(req.check_tx.tx)
-        response = Response(check_tx=result)
-        return write_message(response)
+        return Response(check_tx=result)
 
     def deliver_tx(self, req):
-        result = self.app.deliver_tx(req.deliver_tx.tx)
-        response = Response(deliver_tx=result)
-        return write_message(response)
+        if self.is_asynchronous:
+            self.app.deliver_tx_async(req.deliver_tx.tx)
+            return []
+        else:
+            result = self.app.deliver_tx(req.deliver_tx.tx)
+            return Response(deliver_tx=result)
 
     def query(self, req):
         result = self.app.query(req.query)
-        response = Response(query=result)
-        return write_message(response)
+        return Response(query=result)
 
     def commit(self, req):
         result = self.app.commit()
-        response = Response(commit=result)
-        return write_message(response)
+        return Response(commit=result)
 
     def begin_block(self, req):
         result = self.app.begin_block(req.begin_block)
-        response = Response(begin_block=result)
-        return write_message(response)
+        return Response(begin_block=result)
 
     def end_block(self, req):
-        result = self.app.end_block(req.end_block)
-        response = Response(end_block=result)
-        return write_message(response)
+        results = []
+        if self.is_asynchronous:
+            results = [Response(deliver_tx=result) for result in self.app.deliver_tx_responses()]
+        results.append(Response(end_block=self.app.end_block(req.end_block)))
+        return results
 
     def init_chain(self, req):
         result = self.app.init_chain(req.init_chain)
-        response = Response(init_chain=result)
-        return write_message(response)
+        return Response(init_chain=result)
 
     def no_match(self, req):
-        response = Response(exception=ResponseException(error="ABCI request not found"))
-        return write_message(response)
+        return Response(exception=ResponseException(error="ABCI request not found"))
 
 
 class ABCIServer:
@@ -168,8 +167,8 @@ class ABCIServer:
 
             for message in messages:
                 req_type = message.WhichOneof('value')
-                response = self.protocol.process(req_type, message)
-                socket.send(response)
+                for response in self.protocol.process(req_type, message):
+                    socket.send(write_message(response))
                 last_pos = data.tell()
 
         socket.close()
